@@ -1,0 +1,6 @@
+chromadb>=0.5.0
+
+# Opcionais — só necessários se for importar documentação de banco de dados
+# via import_db_docs.py com --conn mysql://... ou postgres://...
+# pymysql>=1.1.0
+# psycopg2-binary>=2.9.0

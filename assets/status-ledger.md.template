@@ -1,0 +1,29 @@
+# REG — Registro de Desenvolvimento · {{project_name}}
+
+> Última atualização: {{date}}
+> Status: `✅ Concluído` · `🔨 Parcial` · `⬜ Pendente`
+
+Este arquivo é o canal de comunicação confiável entre humanos e agentes de IA
+sobre o estado real do projeto: o que já foi implementado, o que falta, e
+quais armadilhas já foram descobertas. Toda mudança de código relevante deve
+atualizar a tabela do módulo correspondente. Ver seção "Notas" no fim.
+
+---
+
+## <Camada ou módulo — ajuste conforme a arquitetura do projeto>
+
+| Arquivo | Status | Observações |
+|---|---|---|
+| `caminho/exemplo.ext` | ⬜ | |
+
+---
+
+## Armadilhas Conhecidas
+
+- _Registre aqui bugs, limites ou comportamentos não óbvios já enfrentados, para não serem redescobertos do zero em uma sessão futura._
+
+---
+
+## Notas
+
+- **Regra de ouro:** toda alteração de código deve ser acompanhada de atualização deste registro e re-ingestão no RAG (`python scripts/rag_ingest.py`).

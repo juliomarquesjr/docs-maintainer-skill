@@ -1,0 +1,14 @@
+{
+  "name": "docs-maintainer",
+  "description": "Marketplace com o plugin docs-maintainer — mantém documentação markdown + RAG vetorial local sincronizados com o código.",
+  "owner": {
+    "name": "Julio Marques"
+  },
+  "plugins": [
+    {
+      "name": "docs-maintainer",
+      "source": "./",
+      "description": "Mantém documentação (Markdown + MkDocs) sincronizada com o código e indexada num RAG vetorial local (Chroma); importa conteúdo de vaults Obsidian, bancos de dados e outros repositórios markdown."
+    }
+  ]
+}

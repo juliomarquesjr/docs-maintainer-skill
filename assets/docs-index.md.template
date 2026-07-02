@@ -1,0 +1,11 @@
+# {{site_name}}
+
+{{site_description}}
+
+## Índice
+
+| Documento | Conteúdo |
+|---|---|
+| [REG — Registro de Desenvolvimento](REG.md) | Status de implementação por módulo, armadilhas conhecidas |
+
+_Adicione uma linha nesta tabela (e no `nav` do `mkdocs.yml`) para cada novo documento criado em `docs/`._
