@@ -11,9 +11,25 @@ Parte do plugin docs-maintainer.
 """
 
 import argparse
+import os
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+
+# Em Windows, locale.getpreferredencoding() costuma ser cp1252 (não UTF-8).
+# O backend SQLite do Chroma usa esse encoding pra serializar texto quando o
+# modo UTF-8 do Python (PEP 540) não está ativo, corrompendo silenciosamente
+# qualquer caractere acentuado em "�" — tanto na escrita quanto na leitura,
+# sem gerar nenhum erro (o script sempre reporta sucesso normal). Relança
+# como subprocesso com PYTHONUTF8=1 se ainda não estiver ativo, em vez de
+# exigir que quem rodar lembre de setar a env var manualmente. `os.exec*`
+# (replace in-place) causa segfault em ambientes Git-Bash/Windows — por isso
+# subprocess.run + sys.exit(returncode) em vez disso.
+if sys.flags.utf8_mode == 0:
+    env = dict(os.environ, PYTHONUTF8="1")
+    result = subprocess.run([sys.executable, *sys.argv], env=env)
+    sys.exit(result.returncode)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

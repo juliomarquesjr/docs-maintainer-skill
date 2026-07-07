@@ -73,6 +73,28 @@ def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int) -> list[di
         return []
 
     chunks = []
+
+    # Conteúdo antes do primeiro "## " (título "# ...", texto solto,
+    # blockquote de aviso/changelog curto etc.) ficava fora de qualquer
+    # chunk — o loop abaixo só cobre a partir de splits[0].start(). Sem
+    # isso, esse preâmbulo fica 100% invisível pro RAG mesmo quando é
+    # informação relevante (ex.: um resumo/"última atualização" no topo do
+    # arquivo). Se o preâmbulo for muito grande (histórico extenso, tipo um
+    # changelog inteiro), prefira manter changelog em arquivos separados
+    # (um por entrada/data) em vez de um único blockquote gigante no topo —
+    # um chunk muito grande e heterogêneo não fica bem representado por um
+    # único vetor de embedding, mesmo depois de indexado corretamente.
+    preamble = content[:splits[0].start()].strip()
+    if len(preamble) >= min_chars:
+        chunks.append({
+            "id": f"{filepath.stem}::introducao",
+            "source": source,
+            "doc_title": doc_title,
+            "section": doc_title or "Introdução",
+            "content": preamble,
+            "chars": len(preamble),
+        })
+
     for i, match in enumerate(splits):
         start = match.start()
         end = splits[i + 1].start() if i + 1 < len(splits) else len(content)

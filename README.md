@@ -14,20 +14,37 @@ docs/RAG do projeto:
 
 ## O que ela faz
 
-- **Bootstrap**: cria `docs/`, `mkdocs.yml` (opcional) e o pipeline RAG
-  (`scripts/rag_chunker.py`, `rag_ingest.py`, `rag_query.py`) num projeto que
-  ainda não tem nada disso — os scripts ficam versionados no repositório do
-  projeto, sem depender deste plugin depois.
-- **Sync**: depois de mudanças de código, atualiza os docs afetados e
-  re-indexa no RAG.
+- **Bootstrap**: cria `docs/` (+ `docs/changelog/`), `mkdocs.yml` (opcional)
+  e o pipeline RAG (`scripts/rag_chunker.py`, `rag_ingest.py`, `rag_query.py`,
+  `rag_eval.py`) num projeto que ainda não tem nada disso — os scripts ficam
+  versionados no repositório do projeto, sem depender deste plugin depois.
+- **Sync**: depois de mudanças de código, atualiza os docs afetados, cria uma
+  entrada de changelog atômica e re-indexa no RAG.
 - **Importação**: converte conteúdo de Obsidian/banco de dados/outro
   repositório markdown para dentro de `docs/`.
-- **Perguntas**: responde perguntas sobre o projeto consultando o RAG.
+- **Perguntas**: responde perguntas sobre o projeto consultando o RAG,
+  tratando "não encontrei" como sinal fraco (revalida no código antes de
+  reportar como não documentado).
 - **Auditoria**: cruza o que os docs afirmam contra o código real e aponta
   divergências.
 
 A skill sempre detecta o que já existe no projeto antes de agir — nunca
 sobrescreve scripts ou documentação já existentes.
+
+**Convenção central: changelog nunca cresce como um bloco único.** O ledger
+de status (`docs/REG.md`) guarda só o estado atual; cada mudança vira um
+arquivo novo em `docs/changelog/`. Um "Última atualização" que acumula toda
+a história do projeto numa única blockquote vira, ao mesmo tempo, um chunk
+de RAG grande demais pra qualquer modelo de embedding representar bem e um
+bloco difícil de buscar com precisão — problema real encontrado em produção,
+não hipotético (ver `rag_eval.py` abaixo, criado por causa disso).
+
+`rag_eval.py` roda uma lista de perguntas com fonte esperada conhecida
+("golden queries") contra o índice já populado, sem chamar o Claude CLI —
+rápido, determinístico, sem custo. Bugs de indexação (encoding corrompido,
+chunk que sumiu, mudança no chunker) não geram erro no `rag_ingest.py`, que
+sempre reporta sucesso mesmo tendo corrompido o índice inteiro; sem esse
+teste, esses bugs só aparecem por acidente.
 
 ## Instalação
 

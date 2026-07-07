@@ -1,0 +1,15 @@
+# {{date}} — {{title_curto}}
+
+**O quê:** _uma ou duas frases descrevendo a mudança de fora pra dentro (o que passou a funcionar/mudar de comportamento)._
+
+**Por quê:** _o motivo — pedido do usuário, bug encontrado, decisão de arquitetura. Se veio de um bug, descreva o sintoma original._
+
+**Como:** _detalhe técnico o suficiente pra um agente de IA (ou você em 3 meses) entender sem reler o diff — arquivos/funções/rotas envolvidas, decisões de design, trade-offs considerados e descartados._
+
+**Armadilhas encontradas:** _algo não óbvio que valeria uma entrada em "Armadilhas Conhecidas" do REG.md também, se for uma pegadinha reaproveitável (não só desta mudança específica)._
+
+**Validado como:** _testes automatizados, teste manual, Playwright, etc. — como você sabe que funciona._
+
+---
+
+_Um arquivo por entrada (`docs/changelog/{{date}}-slug-curto.md`), nunca acrescentado a outro. Isso mantém cada mudança como um chunk RAG atômico e pesquisável — ver a nota no topo de `docs/REG.md` sobre por quê isso importa._

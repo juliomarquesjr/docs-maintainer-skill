@@ -36,22 +36,38 @@ Resultado da detecção decide o caminho:
 - **Nada existe** → Workflow 1 (Bootstrap).
 - **Parcial** (ex.: tem `docs/` mas não tem pipeline RAG) → pergunte ao
   usuário se quer completar o que falta, reaproveitando o que já existe.
+- **Ledger de status com changelog crescendo numa blockquote única no topo**
+  (`grep -c` no arquivo mostra uma "Última atualização"/parágrafo enorme
+  concatenando várias datas) → é o padrão antigo desta skill, já superado.
+  Pergunte ao usuário se quer migrar: extrair cada entrada histórica pra um
+  arquivo em `docs/changelog/`, deixando só a tabela de estado + "Mudanças
+  Recentes" (últimas 3–5, uma linha cada) no ledger. Não faça essa migração
+  sem perguntar — é uma reestruturação grande de um arquivo que o time já lê
+  num formato conhecido.
 
 ## Scripts desta skill
 
-Ficam em `${CLAUDE_PLUGIN_ROOT}/scripts/`. Os três primeiros são copiados
+Ficam em `${CLAUDE_PLUGIN_ROOT}/scripts/`. Os quatro primeiros são copiados
 para dentro do projeto no Bootstrap (workflow 1) e passam a ser usados a
 partir da cópia do projeto — não da skill. Os importadores **não** são
 copiados: rode-os direto daqui, apontando `--docs-dir` para o projeto atual.
 
 | Script | Função |
 |---|---|
-| `rag_chunker.py` | Divide `docs/*.md` em chunks por seção `##` (usado internamente pelos dois abaixo) |
+| `rag_chunker.py` | Divide `docs/*.md` em chunks por seção `##` (usado internamente pelos três abaixo) |
 | `rag_ingest.py` | Indexa/atualiza os chunks no Chroma local (`--reset` recria do zero) |
 | `rag_query.py` | Consulta o Chroma e responde via `claude --print` |
+| `rag_eval.py` | Testa o retrieval contra golden queries (`rag_eval.json`) — roda depois de todo `rag_ingest.py`, sem chamar o Claude CLI (rápido, sem custo) |
 | `import_obsidian.py` | Converte notas de um vault Obsidian para `docs/_imported/obsidian/` |
 | `import_markdown_folder.py` | Copia markdown de outro repositório/pasta para `docs/_imported/<nome>/` |
 | `import_db_docs.py` | Converte linhas de uma tabela/consulta SQL em `docs/_imported/db/` |
+
+**Por que `rag_eval.py` existe:** bugs de indexação (encoding corrompido,
+chunk que sumiu, mudança no chunker que quebrou uma seção) não geram erro —
+`rag_ingest.py` sempre reporta sucesso mesmo tendo corrompido o índice
+inteiro. Sem um teste de retrieval, isso só é descoberto por acidente,
+perguntando algo e recebendo "não encontrei" pra informação que está
+literalmente no doc. `rag_eval.py` transforma esse acidente em CI.
 
 Antes de rodar qualquer script, garanta a dependência:
 
@@ -73,19 +89,27 @@ python -c "import chromadb" 2>NUL || pip install -r "${CLAUDE_PLUGIN_ROOT}/scrip
    - Se quer `mkdocs.yml` também, ou só o pipeline RAG
    - Se quer um ledger de status (`docs/REG.md`) para rastrear implementação
      por módulo
-2. Crie `docs/` (se não existir) e copie + preencha os templates de
-   `${CLAUDE_PLUGIN_ROOT}/assets/` substituindo `{{site_name}}`,
-   `{{site_description}}`, `{{lang}}`, `{{project_name}}`, `{{date}}`:
+2. Crie `docs/` (se não existir) e `docs/changelog/` junto — é onde toda
+   entrada de changelog vai morar, uma por sessão/mudança, nunca acrescentada
+   a um arquivo único (ver por quê no topo do `status-ledger.md.template`).
+   Copie + preencha os templates de `${CLAUDE_PLUGIN_ROOT}/assets/`
+   substituindo `{{site_name}}`, `{{site_description}}`, `{{lang}}`,
+   `{{project_name}}`, `{{date}}`:
    - `docs-index.md.template` → `docs/index.md`
-   - `status-ledger.md.template` → `docs/REG.md` (se o usuário quiser)
+   - `status-ledger.md.template` → `docs/REG.md` (se o usuário quiser) — é
+     só referência de estado atual + link pra `docs/changelog/`, não um
+     changelog em si
+   - `changelog-entry.md.template` → não copiar ainda; é o molde usado a
+     cada nova entrada (workflow 2), mantenha só em `${CLAUDE_PLUGIN_ROOT}/assets/`
    - `mkdocs.yml.template` → `mkdocs.yml` na raiz (se o usuário quiser)
-3. Copie os 3 scripts RAG (não os importadores) para dentro do projeto,
+3. Copie os 4 scripts RAG (não os importadores) para dentro do projeto,
    versionados no git dele:
    ```bash
    mkdir -p scripts
    cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_chunker.py" scripts/
    cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_ingest.py" scripts/
    cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_query.py" scripts/
+   cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_eval.py" scripts/
    cp "${CLAUDE_PLUGIN_ROOT}/scripts/requirements.txt" scripts/
    ```
    A partir daqui, **sempre** use `scripts/rag_*.py` do projeto — essa cópia
@@ -98,6 +122,12 @@ python -c "import chromadb" 2>NUL || pip install -r "${CLAUDE_PLUGIN_ROOT}/scrip
    A primeira execução baixa o modelo de embedding padrão do Chroma (precisa
    de internet na primeira vez).
 5. Confirme com uma consulta de teste: `python scripts/rag_query.py "do que trata este projeto?"`.
+6. Crie um `rag_eval.json` inicial na raiz do projeto com 3–5 perguntas
+   óbvias sobre os docs recém-criados (ex.: "do que trata este projeto?" →
+   `docs/index.md`) e rode `python scripts/rag_eval.py` pra confirmar que
+   passa. Cresça esse arquivo ao longo do projeto — cada bug de retrieval
+   real que aparecer vira uma pergunta nova aqui, não só um "ah, RAG errou
+   dessa vez".
 
 ## Workflow 2 — Sync após mudança de código (reforça a regra de ouro)
 
@@ -110,15 +140,27 @@ arquivo renomeado/removido, etc.) — não espere o usuário pedir.
 2. Localize docs afetados (grep pelo nome do arquivo/símbolo mudado dentro de
    `docs/*.md`, e olhe o ledger de status se existir).
 3. Atualize o conteúdo dos docs afetados e, se existir, a linha do ledger de
-   status (status ✅/🔨/⬜ + observações). Se a mudança introduziu um
-   comportamento não óbvio (bug sutil, limite de tipo, ordem de chamadas),
-   registre isso na seção "Armadilhas Conhecidas" do ledger.
-4. Re-rode a ingestão (incremental, sem `--reset` — é upsert por id de
+   status (status ✅/🔨/⬜ + observações) — isso é estado atual, edite in
+   loco. Se a mudança introduziu um comportamento não óbvio (bug sutil,
+   limite de tipo, ordem de chamadas), registre isso na seção "Armadilhas
+   Conhecidas" do ledger.
+4. Crie **um arquivo novo** `docs/changelog/{{date}}-slug-curto.md` (molde em
+   `${CLAUDE_PLUGIN_ROOT}/assets/changelog-entry.md.template`) descrevendo a
+   mudança — o quê, por quê, como, armadilhas, validação. **Nunca** acrescente
+   essa narrativa ao topo do ledger de status nem a um changelog de arquivo
+   único: cada entrada precisa ser seu próprio chunk RAG, senão vira
+   informação presente mas praticamente invisível pra busca (ver a explicação
+   no topo do `status-ledger.md.template`). Adicione um bullet de uma linha
+   em "Mudanças Recentes" do ledger, removendo o mais antigo se passar de ~5.
+5. Re-rode a ingestão (incremental, sem `--reset` — é upsert por id de
    chunk):
    ```bash
    python scripts/rag_ingest.py
    ```
-5. Avise o usuário em 1 frase o que foi atualizado.
+6. Se existir `rag_eval.json`, rode `python scripts/rag_eval.py` — e se a
+   mudança de hoje é algo que valeria a pena nunca mais regredir
+   silenciosamente, adicione uma pergunta nova ao arquivo antes de seguir.
+7. Avise o usuário em 1 frase o que foi atualizado.
 
 ## Workflow 3 — Importar fonte externa
 
@@ -160,9 +202,25 @@ Depois de qualquer importação:
 python scripts/rag_query.py "<pergunta>" --show-sources
 ```
 
-Relate a resposta e as fontes. Se a resposta vier como "não encontrei essa
-informação na documentação", diga isso ao usuário em vez de inventar — e
-ofereça investigar o código diretamente ou atualizar a documentação depois.
+Relate a resposta e as fontes. **"Não encontrei essa informação na
+documentação" é sinal fraco, não resposta definitiva** — o RAG local usa um
+modelo de embedding leve e `top-k` baixo por padrão; uma pergunta genérica
+ou parafraseada pode falhar mesmo quando a informação está documentada
+(caso real: perguntar sobre um recurso reaproveitando outro nome de
+componente voltou "não encontrei" na primeira tentativa e encontrou de
+primeira quando a pergunta citou o nome exato do arquivo/símbolo). Antes de
+reportar como "não documentado" ao usuário:
+
+1. Se você (agente) tem acesso a `grep`/leitura de arquivos no projeto,
+   **valide direto no código-fonte** antes de aceitar o "não encontrei" —
+   é mais rápido e mais confiável que insistir em reformular a query.
+2. Se o grep também não achar nada, aí sim é seguro dizer "não está
+   documentado" — e ofereça investigar mais a fundo ou atualizar a
+   documentação depois.
+3. Se a informação *estava* no código/doc e o RAG não achou, isso é uma
+   falha de retrieval a registrar: considere adicionar a pergunta que falhou
+   em `rag_eval.json` (se existir) pra virar teste de regressão, em vez de
+   só seguir em frente.
 
 ## Workflow 5 — Auditoria código↔docs
 
@@ -181,6 +239,19 @@ sem journaling. Para auditar:
 ## Sempre lembrar
 
 Todo workflow (exceto o 4, que é só leitura) termina com: rodar a ingestão
-(`rag_ingest.py`) e, se existir um ledger de status no projeto, atualizá-lo.
-Isso é o que mantém a "regra de ouro" — código e documentação nunca divergem
-por mais que uma sessão.
+(`rag_ingest.py`), rodar `rag_eval.py` se existir fixtures, e — se existir
+um ledger de status no projeto — atualizá-lo (tabela de estado, nunca o
+changelog acrescentado nele). Isso é o que mantém a "regra de ouro" — código
+e documentação nunca divergem por mais que uma sessão, e o índice RAG nunca
+fica quebrado silenciosamente por mais que uma sessão também.
+
+**Nunca deixe o changelog crescer como um único bloco de texto no topo de um
+arquivo.** É o erro estrutural mais caro desta skill: um "Última
+atualização" que acumula toda a história do projeto numa única blockquote
+vira, ao mesmo tempo, um chunk de RAG grande demais pra qualquer modelo de
+embedding representar bem (perguntas específicas deixam de achar informação
+que está literalmente ali) e um bloco difícil de `grep` com precisão. Uma
+entrada por arquivo em `docs/changelog/` resolve os dois problemas com a
+mesma mudança — e é mais barato de manter do que parece, porque cada
+entrada é curta e isolada, em vez de exigir reler/editar um parágrafo gigante
+toda vez.

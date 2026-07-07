@@ -1,12 +1,23 @@
 # REG — Registro de Desenvolvimento · {{project_name}}
 
-> Última atualização: {{date}}
 > Status: `✅ Concluído` · `🔨 Parcial` · `⬜ Pendente`
 
 Este arquivo é o canal de comunicação confiável entre humanos e agentes de IA
-sobre o estado real do projeto: o que já foi implementado, o que falta, e
-quais armadilhas já foram descobertas. Toda mudança de código relevante deve
-atualizar a tabela do módulo correspondente. Ver seção "Notas" no fim.
+sobre o **estado atual** do projeto: o que já foi implementado, o que falta,
+e quais armadilhas já foram descobertas. É referência, não histórico — para
+o que mudou e quando, ver `docs/changelog/` (uma entrada por sessão/data,
+nunca acrescentada aqui).
+
+**Por que separado:** um "Última atualização" único que cresce pra sempre no
+topo deste arquivo parece prático no começo, mas quebra duas coisas ao mesmo
+tempo — (1) vira um chunk gigante e heterogêneo pro RAG, que nenhum modelo
+de embedding representa bem num vetor só (perguntas específicas param de
+encontrar informação que está literalmente ali, ver `docs/changelog/` para
+o caso real que motivou essa mudança de convenção), e (2) mistura o "estado
+atual" (o que importa pra entender o sistema agora) com "o que mudou em
+cada sessão" (histórico, só relevante pra quem quer saber *como* se chegou
+aqui). Mantenha os dois separados: tabela = estado atual, sempre editada in
+loco; `docs/changelog/*.md` = histórico, sempre um arquivo novo por entrada.
 
 ---
 
@@ -20,10 +31,23 @@ atualizar a tabela do módulo correspondente. Ver seção "Notas" no fim.
 
 ## Armadilhas Conhecidas
 
-- _Registre aqui bugs, limites ou comportamentos não óbvios já enfrentados, para não serem redescobertos do zero em uma sessão futura._
+- _Registre aqui bugs, limites ou comportamentos não óbvios já enfrentados, para não serem redescobertos do zero em uma sessão futura. Um bullet por armadilha — se a lista crescer muito (dezenas de entradas), considere mover as mais antigas/raramente relevantes pra `docs/changelog/` e manter aqui só o que ainda é ativo._
+
+---
+
+## Mudanças Recentes
+
+_Últimas 3–5 entradas como bullets curtos (uma linha cada), só pra quem abre este arquivo ter uma visão rápida sem precisar abrir `docs/changelog/`. Detalhe completo sempre no arquivo de changelog correspondente, nunca aqui._
+
+- {{date}} — projeto inicializado com a skill docs-maintainer.
 
 ---
 
 ## Notas
 
-- **Regra de ouro:** toda alteração de código deve ser acompanhada de atualização deste registro e re-ingestão no RAG (`python scripts/rag_ingest.py`).
+- **Regra de ouro:** toda alteração de código relevante deve ser acompanhada de:
+  1. Atualizar a tabela do módulo correspondente acima (estado atual).
+  2. Criar `docs/changelog/{{date}}-slug-curto.md` descrevendo a mudança (o quê, por quê, armadilhas encontradas) — nunca acrescentar ao topo deste arquivo.
+  3. Adicionar um bullet de uma linha em "Mudanças Recentes" (remova o mais antigo se a lista passar de ~5).
+  4. Re-ingerir o RAG (`python scripts/rag_ingest.py`).
+  5. Se existir `scripts/rag_eval.py` com fixtures, rodar `python scripts/rag_eval.py` e conferir que nada regrediu.

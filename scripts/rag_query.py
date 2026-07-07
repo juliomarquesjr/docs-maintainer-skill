@@ -15,10 +15,19 @@ Parte do plugin docs-maintainer.
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Ver rag_ingest.py — mesmo bug de encoding (cp1252 vs UTF-8 no backend
+# SQLite do Chroma em Windows) e mesma correção: relança como subprocesso
+# com PYTHONUTF8=1 se ainda não estiver ativo.
+if sys.flags.utf8_mode == 0:
+    env = dict(os.environ, PYTHONUTF8="1")
+    result = subprocess.run([sys.executable, *sys.argv], env=env)
+    sys.exit(result.returncode)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -62,8 +71,15 @@ def _find_claude_exe() -> str:
 def call_claude(prompt: str) -> str:
     claude_exe = _find_claude_exe()
 
+    # O prompt vai por stdin, não como argumento de linha de comando — um
+    # chunk grande o bastante (ex.: um preâmbulo/changelog longo) estoura o
+    # limite de tamanho de argumento do CreateProcess no Windows
+    # (FileNotFoundError: [WinError 206], nome enganoso — é limite de
+    # tamanho de linha de comando). `claude --print` lê o prompt de stdin
+    # quando nenhum argumento posicional é passado.
     result = subprocess.run(
-        [claude_exe, "--print", prompt],
+        [claude_exe, "--print"],
+        input=prompt,
         capture_output=True,
         text=True,
         encoding="utf-8",
