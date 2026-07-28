@@ -1,16 +1,29 @@
 """
-RAG Chunker — divide docs Markdown em chunks auto-contidos para RAG.
+RAG Chunker — divide docs Markdown em chunks pequenos e auto-contidos para RAG.
 
-Lê todos os .md de um diretório de docs, divide por seção (##) e gera chunks em JSON.
-Cada chunk é auto-contido: carrega o título do documento + heading da seção.
+Lê todos os .md de um diretório de docs e divide em duas etapas:
+  1. por seção (heading `##`);
+  2. dentro de cada seção, em SUB-CHUNKS de ~TARGET_CHARS com sobreposição
+     (OVERLAP_CHARS) entre blocos vizinhos.
+
+Cada sub-chunk é prefixado com "{título do doc} › {seção}", para que o embedding
+tenha o contexto temático mesmo num pedaço do meio da seção. Isso importa porque
+o modelo de embedding tem janela curta (o multilíngue MiniLM trunca ~128 tokens)
+e só "vê" o início de cada chunk — se o chunk for a seção inteira (centenas de
+tokens), o embedding ignora quase tudo. Sub-chunks curtos + prefixo de contexto
+resolvem isso. Ver scripts/rag_embedding.py.
 
 Uso:
-    python rag_chunker.py                        # imprime JSON no stdout (docs/ na raiz do projeto)
+    python rag_chunker.py                         # imprime JSON no stdout (docs/ na raiz do projeto)
     python rag_chunker.py --docs-dir docs --out chunks.json
-    python rag_chunker.py --min-chars 100         # ignora chunks muito curtos
+    python rag_chunker.py --min-chars 100         # ignora seções muito curtas
+    python rag_chunker.py --target-chars 450 --overlap-chars 90
 
-Parte do plugin docs-maintainer. rag_ingest.py e rag_query.py importam as
-funções deste módulo — os três arquivos devem ficar sempre na mesma pasta.
+ATENÇÃO: mudar o esquema de chunking muda os ids dos chunks. Re-indexe do zero
+(`rag_ingest.py --reset`) para não deixar chunks órfãos no Chroma.
+
+Parte do plugin docs-maintainer (adaptado). rag_ingest.py e rag_query.py importam
+as funções deste módulo — os três arquivos devem ficar sempre na mesma pasta.
 """
 
 import argparse
@@ -25,6 +38,23 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {"migrations", "node_modules", ".git", "_site", "site"}
 H2_PATTERN = re.compile(r"^## .+", re.MULTILINE)
+
+# Versão do ESQUEMA de chunking. Faça bump (+1) sempre que mudar o algoritmo de
+# fatiamento ou o formato dos ids/prefixos (qualquer coisa que altere os chunks
+# gerados para um mesmo doc). O rag.lock.json grava este número; rag_verify.py
+# acusa "fora de sync" quando o lock foi gerado por um esquema diferente do atual,
+# forçando um re-ingest (`rag_ingest.py --reset`) em vez de comparar chunks
+# incompatíveis. Ver scripts/rag_manifest.py.
+SCHEMA_VERSION = 1
+
+# Tamanho-alvo do CORPO de cada sub-chunk (sem o prefixo de contexto). ~450 chars
+# ≈ ~120 tokens em PT, para caber na janela do modelo de embedding multilíngue.
+TARGET_CHARS = 450
+# Sobreposição textual (em chars) reaproveitada no início do bloco seguinte, para
+# não cortar uma ideia exatamente na fronteira entre dois chunks.
+OVERLAP_CHARS = 90
+# Cauda residual menor que isto é descartada (evita chunk-lixo no fim da seção).
+MIN_BLOCK_CHARS = 40
 
 
 def resolve_path(value: str, base: Path = ROOT_DIR) -> Path:
@@ -52,7 +82,87 @@ def discover_md_files(docs_dir: Path) -> list[Path]:
     )
 
 
-def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int) -> list[dict]:
+def _to_pieces(text: str, target: int) -> list[str]:
+    """Quebra o texto em 'peças' indivisíveis <= target quando possível: por
+    parágrafo; parágrafo grande vira linhas; linha gigante vira fatias fixas."""
+    pieces: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip("\n")
+        if not para.strip():
+            continue
+        if len(para) <= target:
+            pieces.append(para)
+            continue
+        for line in para.split("\n"):
+            if len(line) <= target:
+                if line.strip():
+                    pieces.append(line)
+            else:
+                for k in range(0, len(line), target):
+                    frag = line[k:k + target]
+                    if frag.strip():
+                        pieces.append(frag)
+    return pieces
+
+
+def _pack(pieces: list[str], target: int, overlap: int) -> list[str]:
+    """Agrupa peças em blocos de ~target chars, repetindo a cauda (~overlap chars,
+    a partir de uma fronteira de espaço) no início do bloco seguinte."""
+    blocks: list[str] = []
+    cur = ""
+    for piece in pieces:
+        if cur and len(cur) + len(piece) + 2 > target:
+            blocks.append(cur)
+            tail = cur[-overlap:] if overlap and len(cur) > overlap else ""
+            if tail:
+                sp = tail.find(" ")
+                if sp != -1:
+                    tail = tail[sp + 1:]
+                cur = f"{tail}\n\n{piece}"
+            else:
+                cur = piece
+        else:
+            cur = f"{cur}\n\n{piece}" if cur else piece
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+def _section_body(section_text: str) -> str:
+    """Remove a 1ª linha (o heading `##`) e devolve o corpo da seção."""
+    nl = section_text.find("\n")
+    return section_text[nl + 1:].strip() if nl != -1 else ""
+
+
+def _emit(filepath: Path, source: str, doc_title: str, section_heading: str,
+          body: str, min_chars: int, target: int, overlap: int) -> list[dict]:
+    """Gera os sub-chunks de uma seção (ou do documento inteiro, se sem `##`)."""
+    body = body.strip()
+    if len(body) < min_chars:
+        return []
+    prefix = f"{doc_title} › {section_heading}".strip(" ›") if section_heading else (doc_title or "")
+    slug_base = slugify(section_heading) if section_heading else "documento"
+    blocks = _pack(_to_pieces(body, target), target, overlap) or [body]
+
+    out: list[dict] = []
+    for j, block in enumerate(blocks):
+        block = block.strip()
+        if not block or (len(block) < MIN_BLOCK_CHARS and len(blocks) > 1):
+            continue
+        content = f"{prefix}\n\n{block}" if prefix else block
+        out.append({
+            "id": f"{filepath.stem}::{slug_base}::{j}",
+            "source": source,
+            "doc_title": doc_title,
+            "section": section_heading or doc_title,
+            "content": content,
+            "chars": len(content),
+        })
+    return out
+
+
+def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int,
+                      target: int = TARGET_CHARS, overlap: int = OVERLAP_CHARS) -> list[dict]:
     content = filepath.read_text(encoding="utf-8")
     doc_title = extract_doc_title(content)
     source = filepath.relative_to(docs_dir.parent).as_posix()
@@ -60,67 +170,28 @@ def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int) -> list[di
     splits = list(H2_PATTERN.finditer(content))
 
     if not splits:
-        text = content.strip()
-        if len(text) >= min_chars:
-            return [{
-                "id": f"{filepath.stem}::documento",
-                "source": source,
-                "doc_title": doc_title,
-                "section": doc_title,
-                "content": text,
-                "chars": len(text),
-            }]
-        return []
+        # Documento sem `##`: trata o corpo inteiro (menos o título `#`) como uma seção.
+        body = re.sub(r"^# .+\n?", "", content, count=1).strip()
+        return _emit(filepath, source, doc_title, "", body, min_chars, target, overlap)
 
-    chunks = []
-
-    # Conteúdo antes do primeiro "## " (título "# ...", texto solto,
-    # blockquote de aviso/changelog curto etc.) ficava fora de qualquer
-    # chunk — o loop abaixo só cobre a partir de splits[0].start(). Sem
-    # isso, esse preâmbulo fica 100% invisível pro RAG mesmo quando é
-    # informação relevante (ex.: um resumo/"última atualização" no topo do
-    # arquivo). Se o preâmbulo for muito grande (histórico extenso, tipo um
-    # changelog inteiro), prefira manter changelog em arquivos separados
-    # (um por entrada/data) em vez de um único blockquote gigante no topo —
-    # um chunk muito grande e heterogêneo não fica bem representado por um
-    # único vetor de embedding, mesmo depois de indexado corretamente.
-    preamble = content[:splits[0].start()].strip()
-    if len(preamble) >= min_chars:
-        chunks.append({
-            "id": f"{filepath.stem}::introducao",
-            "source": source,
-            "doc_title": doc_title,
-            "section": doc_title or "Introdução",
-            "content": preamble,
-            "chars": len(preamble),
-        })
-
+    chunks: list[dict] = []
     for i, match in enumerate(splits):
         start = match.start()
         end = splits[i + 1].start() if i + 1 < len(splits) else len(content)
-
         section_text = content[start:end].strip()
         section_heading = match.group(0).lstrip("# ").strip()
-
-        contextualized = f"# {doc_title}\n\n{section_text}" if doc_title else section_text
-
-        if len(section_text) >= min_chars:
-            chunks.append({
-                "id": f"{filepath.stem}::{slugify(section_heading)}",
-                "source": source,
-                "doc_title": doc_title,
-                "section": section_heading,
-                "content": contextualized,
-                "chars": len(contextualized),
-            })
+        body = _section_body(section_text)
+        chunks.extend(_emit(filepath, source, doc_title, section_heading, body,
+                            min_chars, target, overlap))
 
     return chunks
 
 
-def chunk_docs(docs_dir: Path, min_chars: int) -> list[dict]:
+def chunk_docs(docs_dir: Path, min_chars: int,
+               target: int = TARGET_CHARS, overlap: int = OVERLAP_CHARS) -> list[dict]:
     all_chunks: list[dict] = []
     for filepath in discover_md_files(docs_dir):
-        all_chunks.extend(split_into_chunks(filepath, docs_dir, min_chars))
+        all_chunks.extend(split_into_chunks(filepath, docs_dir, min_chars, target, overlap))
     return all_chunks
 
 
@@ -130,14 +201,18 @@ def main():
                         help="Pasta de docs, relativa à raiz do projeto ou absoluta (padrão: docs)")
     parser.add_argument("--out", help="Arquivo de saída JSON (padrão: stdout)")
     parser.add_argument("--min-chars", type=int, default=80, metavar="N",
-                        help="Ignora chunks com menos de N caracteres (padrão: 80)")
+                        help="Ignora seções com menos de N caracteres (padrão: 80)")
+    parser.add_argument("--target-chars", type=int, default=TARGET_CHARS, metavar="N",
+                        help=f"Tamanho-alvo do corpo de cada sub-chunk (padrão: {TARGET_CHARS})")
+    parser.add_argument("--overlap-chars", type=int, default=OVERLAP_CHARS, metavar="N",
+                        help=f"Sobreposição entre sub-chunks vizinhos (padrão: {OVERLAP_CHARS})")
     args = parser.parse_args()
 
     docs_dir = resolve_path(args.docs_dir)
     if not docs_dir.exists():
         sys.exit(f"Diretório de docs não encontrado: {docs_dir}")
 
-    all_chunks = chunk_docs(docs_dir, args.min_chars)
+    all_chunks = chunk_docs(docs_dir, args.min_chars, args.target_chars, args.overlap_chars)
     output = json.dumps(all_chunks, ensure_ascii=False, indent=2)
 
     if args.out:

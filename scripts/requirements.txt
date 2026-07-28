@@ -1,6 +1,21 @@
-chromadb>=0.5.0
+# Pipeline RAG da documentacao. Versoes PINADAS de proposito: sao elas que
+# determinam os vetores gerados, e o rag.lock.json so tem valor se todo mundo
+# na equipe produzir a MESMA indexacao a partir dos mesmos documentos.
+#
+# Com faixa aberta (>=), dois desenvolvedores podem gerar indices diferentes da
+# mesma documentacao sem que nada acuse — e a busca de um passa a devolver
+# resultado que o outro nao reproduz.
+chromadb==1.5.9
+sentence-transformers==5.6.0
 
-# Opcionais — só necessários se for importar documentação de banco de dados
+# torch e transformers vem como dependencias do sentence-transformers e NAO sao
+# pinados aqui de proposito: o build correto varia por plataforma (o
+# `torch==2.x+cpu` de um servidor Linux nao existe em Mac/ARM). O modelo e o
+# mesmo em todas as maquinas; variacoes minimas de float entre versoes nao mudam
+# o ranking top-k. Por isso rag_verify.py apenas AVISA (nao reprova) quando a
+# toolchain diverge do lock.
+
+# Opcionais — so necessarios se for importar documentacao de banco de dados
 # via import_db_docs.py com --conn mysql://... ou postgres://...
 # pymysql>=1.1.0
 # psycopg2-binary>=2.9.0

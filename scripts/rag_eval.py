@@ -51,10 +51,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import chromadb
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rag_chunker import ROOT_DIR, resolve_path, slugify
+from rag_embedding import get_embedding_function
 
 
 def default_collection_name() -> str:
@@ -105,7 +105,9 @@ def main():
     if not chroma_path.exists():
         sys.exit(f"Chroma não encontrado em {chroma_path}.\nExecute primeiro: python rag_ingest.py")
 
-    ef = DefaultEmbeddingFunction()
+    # O MESMO embedding da ingestao: avaliar com um modelo um indice gerado por
+    # outro compara vetores incomparaveis, e a nota que sai nao significa nada.
+    ef = get_embedding_function()
     client = chromadb.PersistentClient(path=str(chroma_path))
     try:
         collection = client.get_collection(collection_name, embedding_function=ef)
