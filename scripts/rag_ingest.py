@@ -11,34 +11,19 @@ Parte do plugin docs-maintainer.
 """
 
 import argparse
-import os
-import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-
-# Em Windows, locale.getpreferredencoding() costuma ser cp1252 (não UTF-8).
-# O backend SQLite do Chroma usa esse encoding pra serializar texto quando o
-# modo UTF-8 do Python (PEP 540) não está ativo, corrompendo silenciosamente
-# qualquer caractere acentuado em "�" — tanto na escrita quanto na leitura,
-# sem gerar nenhum erro (o script sempre reporta sucesso normal). Relança
-# como subprocesso com PYTHONUTF8=1 se ainda não estiver ativo, em vez de
-# exigir que quem rodar lembre de setar a env var manualmente. `os.exec*`
-# (replace in-place) causa segfault em ambientes Git-Bash/Windows — por isso
-# subprocess.run + sys.exit(returncode) em vez disso.
-if sys.flags.utf8_mode == 0:
-    env = dict(os.environ, PYTHONUTF8="1")
-    result = subprocess.run([sys.executable, *sys.argv], env=env)
-    sys.exit(result.returncode)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import chromadb
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rag_chunker import ROOT_DIR, resolve_path, slugify, chunk_docs
+from rag_embedding import get_embedding_function
+from rag_manifest import compute_manifest, write_lock, LOCK_PATH
 
 BATCH_SIZE = 50
 
@@ -58,6 +43,8 @@ def main():
     parser.add_argument("--reset", action="store_true", help="Apaga e recria a coleção do zero")
     parser.add_argument("--min-chars", type=int, default=80,
                         help="Ignora chunks com menos de N caracteres (padrão: 80)")
+    parser.add_argument("--no-lock", action="store_true",
+                        help="Não atualiza o rag.lock.json ao final (padrão: atualiza)")
     args = parser.parse_args()
 
     docs_dir = resolve_path(args.docs_dir)
@@ -77,7 +64,7 @@ def main():
         except Exception:
             pass
 
-    ef = DefaultEmbeddingFunction()
+    ef = get_embedding_function()
     collection = client.get_or_create_collection(
         name=collection_name,
         embedding_function=ef,
@@ -118,6 +105,15 @@ def main():
         print(f"  {end}/{len(all_chunks)}")
 
     print(f"\nOK — {collection.count()} chunks indexados em {chroma_path}")
+
+    # Atualiza o "mapa de indexação" versionado (rag.lock.json). É ele — e não o
+    # chroma_db/ binário — que viaja no git e garante que todo dev reconstrua a
+    # MESMA indexação. Ver scripts/rag_manifest.py e docs/RAG-INDEXACAO.md.
+    if not args.no_lock:
+        manifest = compute_manifest(docs_dir, collection=collection_name, min_chars=args.min_chars)
+        write_lock(manifest)
+        print(f"rag.lock.json atualizado ({manifest['total_chunks']} chunks, {len(manifest['docs'])} docs) → {LOCK_PATH}")
+
     print('Próximo passo: python rag_query.py "sua pergunta aqui"')
 
 

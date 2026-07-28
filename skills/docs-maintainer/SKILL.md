@@ -47,15 +47,19 @@ Resultado da detecção decide o caminho:
 
 ## Scripts desta skill
 
-Ficam em `${CLAUDE_PLUGIN_ROOT}/scripts/`. Os quatro primeiros são copiados
+Ficam em `${CLAUDE_PLUGIN_ROOT}/scripts/`. Os do pipeline RAG são copiados
 para dentro do projeto no Bootstrap (workflow 1) e passam a ser usados a
 partir da cópia do projeto — não da skill. Os importadores **não** são
 copiados: rode-os direto daqui, apontando `--docs-dir` para o projeto atual.
 
 | Script | Função |
 |---|---|
-| `rag_chunker.py` | Divide `docs/*.md` em chunks por seção `##` (usado internamente pelos três abaixo) |
-| `rag_ingest.py` | Indexa/atualiza os chunks no Chroma local (`--reset` recria do zero) |
+| `rag_chunker.py` | Divide `docs/*.md` em chunks por seção `##`, com sobreposição entre trechos (usado internamente pelos demais) |
+| `rag_embedding.py` | **Ponto único do modelo de embedding.** Todo script que fala com o Chroma pega a função daqui |
+| `rag_manifest.py` | Calcula o manifesto da indexação e grava o `rag.lock.json` |
+| `rag_ingest.py` | Indexa/atualiza os chunks no Chroma local (`--reset` recria do zero) e regrava o lock |
+| `rag_verify.py` | Diz se o índice local bate com o `rag.lock.json` — a resposta para "meu índice está em dia?" |
+| `rag_search.py` | Busca no Chroma e imprime os trechos, **sem** chamar o Claude CLI (rápido, sem custo) |
 | `rag_query.py` | Consulta o Chroma e responde via `claude --print` |
 | `rag_eval.py` | Testa o retrieval contra golden queries (`rag_eval.json`) — roda depois de todo `rag_ingest.py`, sem chamar o Claude CLI (rápido, sem custo) |
 | `import_obsidian.py` | Converte notas de um vault Obsidian para `docs/_imported/obsidian/` |
@@ -68,6 +72,31 @@ chunk que sumiu, mudança no chunker que quebrou uma seção) não geram erro �
 inteiro. Sem um teste de retrieval, isso só é descoberto por acidente,
 perguntando algo e recebendo "não encontrei" pra informação que está
 literalmente no doc. `rag_eval.py` transforma esse acidente em CI.
+
+**Por que `rag.lock.json` existe:** o índice Chroma é binário, regenerável e
+**não** vai para o git — então quem clona o projeto, ou dá `git pull` num
+branch com docs novos, fica com um índice silenciosamente defasado. Nada
+avisa: a busca continua respondendo, só que com o conteúdo de ontem.
+
+O lock é a **prova versionada** do que a indexação deveria conter — hash de
+cada documento, contagem de chunks, modelo de embedding, parâmetros de
+chunking e versões da toolchain. Ele é commitado junto com os `docs/*.md`, e
+`rag_verify.py` compara o índice local contra ele.
+
+Isso resolve dois problemas que não têm sintoma próprio:
+
+1. **Índice defasado depois de um `pull`** — o verify acusa a diferença de
+   chunks ou de hash.
+2. **Dois desenvolvedores gerando índices diferentes** — por isso as versões
+   em `requirements.txt` são pinadas, e não faixas abertas. Divergência de
+   toolchain gera apenas **aviso**, porque variação mínima de float não muda o
+   ranking; divergência de conteúdo, modelo ou esquema é **erro**.
+
+> ⚠️ **Removeu ou renomeou uma seção `##`? Use `--reset`.** O ingest normal é
+> upsert: atualiza e insere, mas **não apaga** chunk que deixou de existir.
+> Renomear uma seção muda o id e deixa o chunk antigo órfão — o índice passa a
+> devolver texto que a documentação não tem mais. O verify pega (a contagem não
+> bate com o lock), mas só depois do estrago.
 
 Antes de rodar qualquer script, garanta a dependência:
 
@@ -106,11 +135,10 @@ python -c "import chromadb" 2>NUL || pip install -r "${CLAUDE_PLUGIN_ROOT}/scrip
    versionados no git dele:
    ```bash
    mkdir -p scripts
-   cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_chunker.py" scripts/
-   cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_ingest.py" scripts/
-   cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_query.py" scripts/
-   cp "${CLAUDE_PLUGIN_ROOT}/scripts/rag_eval.py" scripts/
-   cp "${CLAUDE_PLUGIN_ROOT}/scripts/requirements.txt" scripts/
+   for f in rag_chunker.py rag_embedding.py rag_manifest.py rag_ingest.py \
+            rag_verify.py rag_search.py rag_query.py rag_eval.py requirements.txt; do
+     cp "${CLAUDE_PLUGIN_ROOT}/scripts/$f" scripts/
+   done
    ```
    A partir daqui, **sempre** use `scripts/rag_*.py` do projeto — essa cópia
    não depende mais desta skill estar instalada.
@@ -119,8 +147,20 @@ python -c "import chromadb" 2>NUL || pip install -r "${CLAUDE_PLUGIN_ROOT}/scrip
    pip install -r scripts/requirements.txt
    python scripts/rag_ingest.py --reset
    ```
-   A primeira execução baixa o modelo de embedding padrão do Chroma (precisa
-   de internet na primeira vez).
+   A primeira execução baixa o modelo de embedding (~470 MB, precisa de
+   internet só nessa vez). O modelo padrão é
+   `paraphrase-multilingual-MiniLM-L12-v2`: cobre 50+ idiomas e é forte em
+   **português**, ao contrário do modelo padrão do Chroma, que é treinado em
+   inglês e degrada a busca em documentação escrita em outra língua — sem dar
+   erro nenhum, só trazendo o trecho menos certo.
+
+   Para trocar o modelo, use a variável `RAG_EMBED_MODEL`. Trocar **obriga** a
+   re-ingerir com `--reset`: vetores de modelos diferentes não são comparáveis
+   entre si.
+
+   O `rag_ingest.py` grava o `scripts/rag.lock.json`. **Commite esse arquivo
+   junto com os `docs/*.md`** — é ele que permite ao resto da equipe saber se
+   o índice local está em dia.
 5. Confirme com uma consulta de teste: `python scripts/rag_query.py "do que trata este projeto?"`.
 6. Crie um `rag_eval.json` inicial na raiz do projeto com 3–5 perguntas
    óbvias sobre os docs recém-criados (ex.: "do que trata este projeto?" →
@@ -128,6 +168,29 @@ python -c "import chromadb" 2>NUL || pip install -r "${CLAUDE_PLUGIN_ROOT}/scrip
    passa. Cresça esse arquivo ao longo do projeto — cada bug de retrieval
    real que aparecer vira uma pergunta nova aqui, não só um "ah, RAG errou
    dessa vez".
+
+7. Registre no README (ou no `docs/index.md`) a regra que faz o lock valer:
+   **editou `docs/*.md` → re-indexe e commite o `scripts/rag.lock.json` na
+   mesma tarefa**; **depois de um `git pull` → rode `rag_verify.py`**, porque
+   o pull traz docs e lock novos, mas não traz o índice.
+
+## Workflow 1b — Projeto que já tem pipeline RAG antigo
+
+Se a detecção encontrar `scripts/rag_ingest.py` **sem** `rag_embedding.py` nem
+`rag.lock.json`, o projeto está na versão anterior deste pipeline. Sintomas:
+busca em português pior do que deveria, e nenhuma forma de saber se o índice
+está defasado.
+
+Para alinhar, **pergunte antes** — é mudança que invalida o índice existente:
+
+1. copie os scripts que faltam (lista do passo 3 acima) e o `requirements.txt`;
+2. se o projeto tiver `rag_eval.py`, confirme que ele importa
+   `get_embedding_function` de `rag_embedding` — se ainda instanciar o modelo
+   por conta própria, ele passa a **avaliar com um modelo o índice gerado por
+   outro**, e a nota que sai não significa nada;
+3. `pip install -r scripts/requirements.txt` (as versões agora são pinadas);
+4. `python scripts/rag_ingest.py --reset` — obrigatório, o modelo mudou;
+5. `python scripts/rag_verify.py` para confirmar, e commite o lock.
 
 ## Workflow 2 — Sync após mudança de código (reforça a regra de ouro)
 
@@ -157,6 +220,11 @@ arquivo renomeado/removido, etc.) — não espere o usuário pedir.
    ```bash
    python scripts/rag_ingest.py
    ```
+   ⚠️ Se você **removeu ou renomeou** uma seção `##`, use `--reset`: o upsert
+   não apaga chunk que deixou de existir, e o antigo fica órfão no índice.
+5b. **Commite o `scripts/rag.lock.json` junto com os `docs/*.md` alterados.**
+   Sem isso, o resto da equipe não tem como saber que o índice deles ficou
+   velho — e nada vai avisar.
 6. Se existir `rag_eval.json`, rode `python scripts/rag_eval.py` — e se a
    mudança de hoje é algo que valeria a pena nunca mais regredir
    silenciosamente, adicione uma pergunta nova ao arquivo antes de seguir.
@@ -197,6 +265,23 @@ Depois de qualquer importação:
 3. Se o projeto tem `mkdocs.yml`, adicione o conteúdo relevante ao `nav`.
 
 ## Workflow 4 — Responder perguntas sobre o projeto
+
+Se houver `rag.lock.json`, comece confirmando que o índice está em dia — é
+barato, e responder a partir de índice defasado é pior do que não responder:
+
+```bash
+python scripts/rag_verify.py      # acusou drift? rode rag_ingest.py antes
+```
+
+Para **você (agente)** ler os trechos e formar a resposta, prefira o
+`rag_search.py`: ele imprime o conteúdo direto, sem chamar o Claude CLI —
+mais rápido e sem custo.
+
+```bash
+python scripts/rag_search.py "<pergunta>"
+```
+
+Use o `rag_query.py` quando quiser a resposta já sintetizada pelo modelo:
 
 ```bash
 python scripts/rag_query.py "<pergunta>" --show-sources
@@ -239,7 +324,8 @@ sem journaling. Para auditar:
 ## Sempre lembrar
 
 Todo workflow (exceto o 4, que é só leitura) termina com: rodar a ingestão
-(`rag_ingest.py`), rodar `rag_eval.py` se existir fixtures, e — se existir
+(`rag_ingest.py`), **commitar o `rag.lock.json` junto com os docs**, rodar
+`rag_eval.py` se existir fixtures, e — se existir
 um ledger de status no projeto — atualizá-lo (tabela de estado, nunca o
 changelog acrescentado nele). Isso é o que mantém a "regra de ouro" — código
 e documentação nunca divergem por mais que uma sessão, e o índice RAG nunca

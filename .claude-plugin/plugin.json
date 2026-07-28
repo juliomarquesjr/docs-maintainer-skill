@@ -3,7 +3,7 @@
   "name": "docs-maintainer",
   "displayName": "Docs Maintainer",
   "description": "Mantém documentação (Markdown + MkDocs) sincronizada com o código e indexada num RAG vetorial local (Chroma); importa conteúdo de vaults Obsidian, bancos de dados e outros repositórios markdown.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Julio Marques"
   },
