@@ -106,6 +106,18 @@ def main():
         )
         print(f"  {end}/{len(all_chunks)}")
 
+    # Remove do indice o que nao existe mais: secao renomeada, arquivo apagado,
+    # ou ids gerados por um esquema de chunking anterior. So com o upsert esses
+    # chunks ficariam orfaos -- a busca responderia com texto apagado (ou o mesmo
+    # trecho duas vezes, numa troca de esquema), e o rag_verify acusaria
+    # divergencia sem que rodar a ingestao de novo resolvesse.
+    atuais = set(ids)
+    orfaos = [i for i in collection.get(include=[])["ids"] if i not in atuais]
+    for i in range(0, len(orfaos), BATCH_SIZE):
+        collection.delete(ids=orfaos[i:i + BATCH_SIZE])
+    if orfaos:
+        print(f"  {len(orfaos)} chunk(s) que nao existem mais removido(s) do indice")
+
     print(f"\nOK — {collection.count()} chunks indexados em {chroma_path}")
 
     # Atualiza o "mapa de indexação" versionado (rag.lock.json). É ele — e não o
