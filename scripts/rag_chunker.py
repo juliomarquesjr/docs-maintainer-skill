@@ -29,6 +29,7 @@ as funções deste módulo — os três arquivos devem ficar sempre na mesma pas
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -45,7 +46,9 @@ H2_PATTERN = re.compile(r"^## .+", re.MULTILINE)
 # acusa "fora de sync" quando o lock foi gerado por um esquema diferente do atual,
 # forçando um re-ingest (`rag_ingest.py --reset`) em vez de comparar chunks
 # incompatíveis. Ver scripts/rag_manifest.py.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# v2: id pelo caminho relativo (nao pelo nome do arquivo), chunk da introducao
+# antes do primeiro `##`, e os .md da raiz do projeto entram no indice.
 
 # Tamanho-alvo do CORPO de cada sub-chunk (sem o prefixo de contexto). ~450 chars
 # ≈ ~120 tokens em PT, para caber na janela do modelo de embedding multilíngue.
@@ -75,11 +78,97 @@ def extract_doc_title(content: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def discover_md_files(docs_dir: Path) -> list[Path]:
-    return sorted(
+# .md da raiz que nunca entram: instrucao para agente nao e documentacao.
+ROOT_DOC_EXCLUDES = {"claude.md", "agents.md"}
+INCLUDE_HELP = (
+    "Arquivo .md avulso fora de docs/ a indexar junto (repetivel). Padrao: os .md "
+    "da raiz do projeto VERSIONADOS no git, menos CLAUDE.md e AGENTS.md. "
+    'Use --include "" para indexar apenas docs/.'
+)
+
+
+def _root_md_in_git() -> list[str] | None:
+    """Os .md da raiz que o git versiona, ou None fora de um repositorio git.
+
+    So os versionados: um rascunho solto na raiz (guia para outro time, nota
+    pessoal) entraria no indice e competiria no retrieval com a documentacao de
+    verdade -- caso real, medido num projeto que usa esta skill.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--", "*.md"], cwd=ROOT_DIR,
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [linha for linha in out.splitlines() if linha and "/" not in linha]
+
+
+def default_includes() -> list[str]:
+    """Os .md da raiz do projeto, menos os excluidos, em ordem estavel."""
+    nomes = _root_md_in_git()
+    if nomes is None:
+        nomes = [f.name for f in ROOT_DIR.glob("*.md")]
+    return sorted(n for n in nomes if n.lower() not in ROOT_DOC_EXCLUDES)
+
+
+def resolve_includes(values: list[str] | None) -> list[Path]:
+    """Traduz os --include em caminhos absolutos, avisando o que nao existe.
+
+    `--include ""` (string vazia) desliga o padrao sem precisar de outra flag.
+    """
+    names = default_includes() if values is None else [v for v in values if v.strip()]
+    paths = []
+    for name in names:
+        path = resolve_path(name)
+        if path.is_file():
+            paths.append(path)
+        else:
+            print(f"aviso: --include {name} nao encontrado ({path}) -- ignorado", file=sys.stderr)
+    return paths
+
+
+def relative_source(filepath: Path, docs_dir: Path) -> str:
+    """Caminho legivel do arquivo para o metadado `source` do chunk.
+
+    O README da raiz nao e relativo a docs_dir.parent quando docs/ nao fica na
+    raiz, entao cai para a raiz do projeto antes de desistir e usar so o nome.
+    """
+    for base in (docs_dir.parent, ROOT_DIR):
+        try:
+            return filepath.resolve().relative_to(base.resolve()).as_posix()
+        except ValueError:
+            continue
+    return filepath.name
+
+
+def discover_md_files(docs_dir: Path, extra_files: list[Path] | None = None) -> list[Path]:
+    """Todos os .md de docs/ mais os arquivos avulsos pedidos em --include.
+
+    O README da raiz costuma ser o documento principal. Copia-lo para docs/
+    criaria uma segunda copia do mesmo texto, e as duas divergem em silencio --
+    por isso ele e lido onde esta.
+    """
+    found = [
         f for f in docs_dir.rglob("*.md")
         if not any(part in SKIP_DIRS for part in f.parts)
-    )
+    ]
+    seen = {f.resolve() for f in found}
+    for extra in (extra_files or []):
+        if extra.is_file() and extra.resolve() not in seen:
+            found.append(extra)
+            seen.add(extra.resolve())
+    return sorted(found)
+
+
+def doc_id_for(source: str) -> str:
+    """Prefixo do id dos chunks de um arquivo, derivado do caminho relativo.
+
+    Pelo nome do arquivo (`stem`), `docs/a/index.md` e `docs/b/index.md`
+    gerariam os mesmos ids, e o upsert de um sobrescreveria o outro sem erro.
+    """
+    stem_path = source[:-3] if source.endswith(".md") else source
+    return slugify(stem_path.replace("/", "--"))
 
 
 def _to_pieces(text: str, target: int) -> list[str]:
@@ -135,13 +224,14 @@ def _section_body(section_text: str) -> str:
 
 
 def _emit(filepath: Path, source: str, doc_title: str, section_heading: str,
-          body: str, min_chars: int, target: int, overlap: int) -> list[dict]:
+          body: str, min_chars: int, target: int, overlap: int,
+          slug_base: str | None = None) -> list[dict]:
     """Gera os sub-chunks de uma seção (ou do documento inteiro, se sem `##`)."""
     body = body.strip()
     if len(body) < min_chars:
         return []
     prefix = f"{doc_title} › {section_heading}".strip(" ›") if section_heading else (doc_title or "")
-    slug_base = slugify(section_heading) if section_heading else "documento"
+    slug_base = slug_base or (slugify(section_heading) if section_heading else "documento")
     blocks = _pack(_to_pieces(body, target), target, overlap) or [body]
 
     out: list[dict] = []
@@ -151,7 +241,7 @@ def _emit(filepath: Path, source: str, doc_title: str, section_heading: str,
             continue
         content = f"{prefix}\n\n{block}" if prefix else block
         out.append({
-            "id": f"{filepath.stem}::{slug_base}::{j}",
+            "id": f"{doc_id_for(source)}::{slug_base}::{j}",
             "source": source,
             "doc_title": doc_title,
             "section": section_heading or doc_title,
@@ -165,7 +255,7 @@ def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int,
                       target: int = TARGET_CHARS, overlap: int = OVERLAP_CHARS) -> list[dict]:
     content = filepath.read_text(encoding="utf-8")
     doc_title = extract_doc_title(content)
-    source = filepath.relative_to(docs_dir.parent).as_posix()
+    source = relative_source(filepath, docs_dir)
 
     splits = list(H2_PATTERN.finditer(content))
 
@@ -175,6 +265,14 @@ def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int,
         return _emit(filepath, source, doc_title, "", body, min_chars, target, overlap)
 
     chunks: list[dict] = []
+
+    # O texto antes do primeiro `##` costuma ser o que diz para que o documento
+    # serve -- justamente o que responde "onde esta X?". Sem este chunk ele
+    # nunca entraria no indice.
+    preamble = re.sub(r"^# .+\n?", "", content[:splits[0].start()], count=1).strip()
+    chunks.extend(_emit(filepath, source, doc_title, "", preamble,
+                        min_chars, target, overlap, slug_base="introducao"))
+
     for i, match in enumerate(splits):
         start = match.start()
         end = splits[i + 1].start() if i + 1 < len(splits) else len(content)
@@ -187,10 +285,71 @@ def split_into_chunks(filepath: Path, docs_dir: Path, min_chars: int,
     return chunks
 
 
+ARCHIVE_PREFIX = "docs/changelog/"
+
+
+def diversify_by_source(metadatas, top_k, max_per_source, max_archive=2):
+    """Indices dos chunks a manter, limitando quantos vem do mesmo arquivo.
+
+    Sem isto um documento longo e recente monopoliza o top-k: um changelog de
+    seis secoes ocupou as posicoes 1-4 e 6-7 numa pergunta cuja resposta de
+    referencia estava no README, em 5o lugar.
+
+    `max_archive` limita o TOTAL de chunks vindos de docs/changelog/, somando
+    todos os arquivos de la -- cada entrada e um arquivo diferente, entao o
+    limite por fonte sozinho deixa tres entradas ocuparem o top-k inteiro.
+    Changelog e narrativa historica: deve continuar alcancavel, mas nao pode
+    afogar a referencia em perguntas sobre o estado atual. O acervo so cresce.
+
+    A ordem de relevancia e preservada, o que exige buscar mais candidatos do
+    que o top-k. ATENCAO: quando a diversificacao nao enche o top-k, os pulados
+    voltam no fim (repesco) -- uma golden query pode passar so por isso, e
+    qualquer doc novo a derruba sem o esperado ter piorado. Olhe as distancias
+    antes de "consertar" texto.
+    """
+    escolhidos, por_fonte, do_acervo = [], {}, 0
+    for i, meta in enumerate(metadatas):
+        fonte = meta.get("source", "")
+        if por_fonte.get(fonte, 0) >= max_per_source:
+            continue
+        if fonte.startswith(ARCHIVE_PREFIX):
+            if do_acervo >= max_archive:
+                continue
+            # Dentro do acervo o limite por arquivo cai para 1: cada entrada e
+            # um assunto distinto, e uma delas com as duas vagas expulsa as outras.
+            if por_fonte.get(fonte, 0) >= 1:
+                continue
+            do_acervo += 1
+        por_fonte[fonte] = por_fonte.get(fonte, 0) + 1
+        escolhidos.append(i)
+        if len(escolhidos) == top_k:
+            break
+
+    if len(escolhidos) < top_k:
+        ja = set(escolhidos)
+        restantes = [i for i in range(len(metadatas)) if i not in ja]
+        escolhidos.extend(restantes[: top_k - len(escolhidos)])
+
+    return escolhidos
+
+
+def candidates_for(top_k: int, max_per_source: int) -> int:
+    """Quantos candidatos buscar no Chroma para a diversificacao ter folga.
+
+    Com sub-chunks de ~450 chars, um documento so ocupa facilmente as primeiras
+    dezenas de posicoes; com lote pequeno a diversificacao fica sem outra fonte
+    e o repesco devolve o mesmo arquivo seis vezes. Medido num projeto real
+    (162 golden queries, 3.5 mil chunks): lote de 18 deu 143, de 30 deu 146,
+    de 60 tambem 146 -- 5x o top-k basta.
+    """
+    return top_k * max(5, max_per_source + 1)
+
+
 def chunk_docs(docs_dir: Path, min_chars: int,
-               target: int = TARGET_CHARS, overlap: int = OVERLAP_CHARS) -> list[dict]:
+               target: int = TARGET_CHARS, overlap: int = OVERLAP_CHARS,
+               extra_files: list[Path] | None = None) -> list[dict]:
     all_chunks: list[dict] = []
-    for filepath in discover_md_files(docs_dir):
+    for filepath in discover_md_files(docs_dir, extra_files):
         all_chunks.extend(split_into_chunks(filepath, docs_dir, min_chars, target, overlap))
     return all_chunks
 
@@ -206,13 +365,15 @@ def main():
                         help=f"Tamanho-alvo do corpo de cada sub-chunk (padrão: {TARGET_CHARS})")
     parser.add_argument("--overlap-chars", type=int, default=OVERLAP_CHARS, metavar="N",
                         help=f"Sobreposição entre sub-chunks vizinhos (padrão: {OVERLAP_CHARS})")
+    parser.add_argument("--include", action="append", default=None, metavar="ARQ", help=INCLUDE_HELP)
     args = parser.parse_args()
 
     docs_dir = resolve_path(args.docs_dir)
     if not docs_dir.exists():
         sys.exit(f"Diretório de docs não encontrado: {docs_dir}")
 
-    all_chunks = chunk_docs(docs_dir, args.min_chars, args.target_chars, args.overlap_chars)
+    all_chunks = chunk_docs(docs_dir, args.min_chars, args.target_chars, args.overlap_chars,
+                            resolve_includes(args.include))
     output = json.dumps(all_chunks, ensure_ascii=False, indent=2)
 
     if args.out:

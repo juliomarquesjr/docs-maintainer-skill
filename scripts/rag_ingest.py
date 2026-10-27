@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import chromadb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_chunker import ROOT_DIR, resolve_path, slugify, chunk_docs
+from rag_chunker import INCLUDE_HELP, ROOT_DIR, resolve_includes, resolve_path, slugify, chunk_docs
 from rag_embedding import get_embedding_function
 from rag_manifest import compute_manifest, write_lock, LOCK_PATH
 
@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--collection", default=None,
                         help="Nome da coleção Chroma (padrão: <nome-da-pasta-do-projeto>_docs)")
     parser.add_argument("--reset", action="store_true", help="Apaga e recria a coleção do zero")
+    parser.add_argument("--include", action="append", default=None, metavar="ARQ", help=INCLUDE_HELP)
     parser.add_argument("--min-chars", type=int, default=80,
                         help="Ignora chunks com menos de N caracteres (padrão: 80)")
     parser.add_argument("--no-lock", action="store_true",
@@ -71,7 +72,8 @@ def main():
         metadata={"hnsw:space": "cosine"},
     )
 
-    all_chunks = chunk_docs(docs_dir, args.min_chars)
+    extra_files = resolve_includes(args.include)
+    all_chunks = chunk_docs(docs_dir, args.min_chars, extra_files=extra_files)
 
     if not all_chunks:
         print(f"Nenhum chunk encontrado em {docs_dir}.")
@@ -110,7 +112,8 @@ def main():
     # chroma_db/ binário — que viaja no git e garante que todo dev reconstrua a
     # MESMA indexação. Ver scripts/rag_manifest.py e docs/RAG-INDEXACAO.md.
     if not args.no_lock:
-        manifest = compute_manifest(docs_dir, collection=collection_name, min_chars=args.min_chars)
+        manifest = compute_manifest(docs_dir, collection=collection_name, min_chars=args.min_chars,
+                                    extra_files=extra_files)
         write_lock(manifest)
         print(f"rag.lock.json atualizado ({manifest['total_chunks']} chunks, {len(manifest['docs'])} docs) → {LOCK_PATH}")
 

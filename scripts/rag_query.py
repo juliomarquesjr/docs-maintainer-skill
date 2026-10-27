@@ -26,7 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import chromadb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_chunker import ROOT_DIR, resolve_path, slugify
+from rag_chunker import ROOT_DIR, candidates_for, diversify_by_source, resolve_path, slugify
 from rag_embedding import get_embedding_function
 
 PROMPT_TEMPLATE = """\
@@ -107,6 +107,8 @@ def main():
         description="Consulta a documentação de um projeto via RAG + Claude CLI"
     )
     parser.add_argument("question", help="Pergunta sobre o projeto")
+    parser.add_argument("--max-per-source", type=int, default=2, metavar="N",
+                        help="Maximo de chunks vindos do mesmo arquivo (padrao: 2). Impede que um documento longo monopolize o top-k.")
     parser.add_argument("--chroma-path", default="chroma_db",
                         help="Pasta do Chroma persistente, relativa à raiz do projeto ou absoluta (padrão: chroma_db)")
     parser.add_argument("--collection", default=None,
@@ -140,11 +142,18 @@ def main():
             "Execute primeiro: python rag_ingest.py"
         )
 
-    results = collection.query(
+    # Busca mais candidatos do que o top-k: a diversificacao por fonte descarta
+    # o excedente de cada arquivo, e sem folga sobraria menos que o pedido.
+    bruto = collection.query(
         query_texts=[args.question],
-        n_results=args.top_k,
+        n_results=candidates_for(args.top_k, args.max_per_source),
         include=["documents", "metadatas", "distances"],
     )
+    manter = diversify_by_source(bruto["metadatas"][0], args.top_k, args.max_per_source)
+    results = {
+        chave: [[bruto[chave][0][i] for i in manter]]
+        for chave in ("documents", "metadatas", "distances")
+    }
 
     context, chunks = build_context(results)
 
