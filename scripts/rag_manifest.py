@@ -43,6 +43,8 @@ from rag_chunker import (  # noqa: E402
     SCHEMA_VERSION,
     TARGET_CHARS,
     discover_md_files,
+    relative_source,
+    resolve_includes,
     resolve_path,
     slugify,
     split_into_chunks,
@@ -82,6 +84,7 @@ def compute_manifest(
     min_chars: int = DEFAULT_MIN_CHARS,
     target: int = TARGET_CHARS,
     overlap: int = OVERLAP_CHARS,
+    extra_files: list[Path] | None = None,
 ) -> dict:
     """Computa o manifesto do estado ATUAL dos docs + config, sem carregar o
     modelo de embedding (rápido: só lê arquivos e roda o chunker). Determinístico
@@ -92,7 +95,12 @@ def compute_manifest(
 
     docs: list[dict] = []
     total = 0
-    for filepath in discover_md_files(docs_dir):
+    # Sem extra_files explicito, os mesmos .md da raiz que a ingestao usa por
+    # padrao -- senao o lock ignoraria o README e o verify nunca acusaria
+    # README alterado.
+    if extra_files is None:
+        extra_files = resolve_includes(None)
+    for filepath in discover_md_files(docs_dir, extra_files):
         # Hash sobre o TEXTO normalizado (read_text usa universal newlines:
         # CRLF/CR -> LF), não sobre os bytes crus. Sem isso, o sha256 dependeria do
         # line-ending do checkout de cada dev (git autocrlf no Windows daria hash
@@ -104,7 +112,7 @@ def compute_manifest(
         total += n
         docs.append(
             {
-                "source": filepath.relative_to(docs_dir.parent).as_posix(),
+                "source": relative_source(filepath, docs_dir),
                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "chunks": n,
             }

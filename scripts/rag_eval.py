@@ -53,7 +53,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import chromadb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_chunker import ROOT_DIR, resolve_path, slugify
+from rag_chunker import ROOT_DIR, candidates_for, diversify_by_source, resolve_path, slugify
 from rag_embedding import get_embedding_function
 
 
@@ -94,6 +94,8 @@ def main():
                         help="Nome da coleção Chroma (padrão: <nome-da-pasta-do-projeto>_docs)")
     parser.add_argument("--top-k", type=int, default=4,
                         help="Chunks a recuperar por pergunta (padrão: 4, mesmo default de rag_query.py)")
+    parser.add_argument("--max-per-source", type=int, default=2, metavar="N",
+                        help="Maximo de chunks vindos do mesmo arquivo (padrao: 2). Impede que um documento longo monopolize o top-k.")
     args = parser.parse_args()
 
     fixtures_path = resolve_path(args.fixtures)
@@ -121,12 +123,16 @@ def main():
         question = case["question"]
         expected = case["expect_source"]
 
+        # A mesma diversificacao do rag_query.py: avaliar sem ela mediria uma
+        # busca que ninguem usa.
         results = collection.query(
             query_texts=[question],
-            n_results=args.top_k,
+            n_results=candidates_for(args.top_k, args.max_per_source),
             include=["metadatas"],
         )
-        sources_found = [m["source"] for m in results["metadatas"][0]]
+        metadados = results["metadatas"][0]
+        manter = diversify_by_source(metadados, args.top_k, args.max_per_source)
+        sources_found = [metadados[i]["source"] for i in manter]
 
         ok = matches_expected(sources_found, expected)
         status = "OK  " if ok else "FAIL"

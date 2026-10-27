@@ -32,7 +32,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_chunker import resolve_path
+from rag_chunker import INCLUDE_HELP, resolve_includes, resolve_path
 from rag_manifest import LOCK_PATH, compute_manifest, diff_manifest, load_lock
 
 
@@ -54,6 +54,7 @@ def main() -> None:
     parser.add_argument("--chroma-path", default="chroma_db", help="Pasta do Chroma persistente (padrão: chroma_db)")
     parser.add_argument("--no-chroma", action="store_true", help="Não confere o índice físico local, só lock vs docs")
     parser.add_argument("--json", action="store_true", help="Saída estruturada (para agentes)")
+    parser.add_argument("--include", action="append", default=None, metavar="ARQ", help=INCLUDE_HELP)
     args = parser.parse_args()
 
     locked = load_lock()
@@ -63,7 +64,8 @@ def main() -> None:
         sys.exit(2)
 
     docs_dir = resolve_path(args.docs_dir)
-    current = compute_manifest(docs_dir, collection=locked.get("collection"), min_chars=locked.get("chunking", {}).get("min_chars", 80))
+    current = compute_manifest(docs_dir, collection=locked.get("collection"), min_chars=locked.get("chunking", {}).get("min_chars", 80),
+                               extra_files=resolve_includes(args.include))
     d = diff_manifest(current, locked)
     hard, soft = d["hard"], d["soft"]
 

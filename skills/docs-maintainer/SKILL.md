@@ -181,7 +181,21 @@ Se a detecção encontrar `scripts/rag_ingest.py` **sem** `rag_embedding.py` nem
 busca em português pior do que deveria, e nenhuma forma de saber se o índice
 está defasado.
 
-Para alinhar, **pergunte antes** — é mudança que invalida o índice existente:
+Para alinhar, **pergunte antes** — é mudança que invalida o índice existente.
+
+**Antes de copiar qualquer coisa, compare os scripts do projeto com os desta
+skill** (`diff`). Projetos evoluem as próprias cópias — num caso real, a do
+projeto indexava o README da raiz, tinha id de chunk pelo caminho e teto de
+changelog no resultado, e nada disso existia aqui. Sobrescrever apagaria as três
+sem erro visível: o eval só despenca. Se divergiram, porte as melhorias para cá
+(ou para lá) antes, e nunca copie por cima.
+
+**Meça antes e depois, com as mesmas golden queries.** Rode `rag_eval.py` com
+`--top-k 6`, `3` e `1` no pipeline atual, troque, re-ingira com `--reset` e
+rode de novo. Lembre do viés: as perguntas foram afinadas no pipeline antigo, e
+um empate ou uma pequena perda no top-6 não prova que o novo é pior — olhe o
+top-1. No caso real: top-1 subiu de 70 para 84 de 162, e o top-6 caiu de 162
+para 146; adotar exigiria revisar as perguntas, e foi decisão separada.
 
 1. copie os scripts que faltam (lista do passo 3 acima) e o `requirements.txt`;
 2. se o projeto tiver `rag_eval.py`, confirme que ele importa
@@ -189,7 +203,8 @@ Para alinhar, **pergunte antes** — é mudança que invalida o índice existent
    por conta própria, ele passa a **avaliar com um modelo o índice gerado por
    outro**, e a nota que sai não significa nada;
 3. `pip install -r scripts/requirements.txt` (as versões agora são pinadas);
-4. `python scripts/rag_ingest.py --reset` — obrigatório, o modelo mudou;
+4. `python scripts/rag_ingest.py --reset` — obrigatório: o modelo mudou, e o
+   `SCHEMA_VERSION` do chunker também (ids e introdução mudaram na v2);
 5. `python scripts/rag_verify.py` para confirmar, e commite o lock.
 
 ## Workflow 2 — Sync após mudança de código (reforça a regra de ouro)
@@ -214,20 +229,37 @@ arquivo renomeado/removido, etc.) — não espere o usuário pedir.
    único: cada entrada precisa ser seu próprio chunk RAG, senão vira
    informação presente mas praticamente invisível pra busca (ver a explicação
    no topo do `status-ledger.md.template`). Adicione um bullet de uma linha
-   em "Mudanças Recentes" do ledger, removendo o mais antigo se passar de ~5.
+   em "Mudanças Recentes" do ledger. **Só apare a lista se o projeto a usa como
+   "últimas N"**: quando ela é o índice navegável do `changelog/` (uma linha
+   por entrada), podar apaga o sumário curado — já custou 44 linhas uma vez.
+   Leia o cabeçalho da seção antes.
 5. Re-rode a ingestão (incremental, sem `--reset` — é upsert por id de
    chunk):
    ```bash
    python scripts/rag_ingest.py
    ```
-   ⚠️ Se você **removeu ou renomeou** uma seção `##`, use `--reset`: o upsert
-   não apaga chunk que deixou de existir, e o antigo fica órfão no índice.
+   ⚠️ Se você **removeu ou renomeou** uma seção `##` ou um arquivo, use
+   `--reset`: o upsert não apaga chunk que deixou de existir, e o antigo fica
+   órfão no índice — o eval pode passar respondendo com o texto apagado.
 5b. **Commite o `scripts/rag.lock.json` junto com os `docs/*.md` alterados.**
    Sem isso, o resto da equipe não tem como saber que o índice deles ficou
    velho — e nada vai avisar.
 6. Se existir `rag_eval.json`, rode `python scripts/rag_eval.py` — e se a
    mudança de hoje é algo que valeria a pena nunca mais regredir
    silenciosamente, adicione uma pergunta nova ao arquivo antes de seguir.
+   **Pergunta antiga falhou depois de um doc novo? Meça antes de mexer em
+   texto.** Consulte o Chroma direto e veja posição e distância do chunk
+   esperado. Três casos:
+   - ele estava na beira do lote de candidatos (ou voltou pelo repesco do
+     `diversify_by_source`) e o doc novo só tomou a vaga — a pergunta passava
+     por sorte; não é regressão do esperado;
+   - o chunk certo é pequeno e mesmo assim está longe (~0,45+ de distância):
+     o problema é a pergunta, quase sempre uma metáfora que não existe no
+     texto. Reformular com o vocabulário do domínio é manutenção legítima;
+   - o doc novo é que é genérico demais (título que casa com tudo): ajuste o
+     título dele ao escopo real.
+   Trocar o `expect_source` por um documento que **não responde** é maquiar o
+   teste, nunca conserto.
 7. Avise o usuário em 1 frase o que foi atualizado.
 
 ## Workflow 3 — Importar fonte externa
@@ -330,6 +362,12 @@ um ledger de status no projeto — atualizá-lo (tabela de estado, nunca o
 changelog acrescentado nele). Isso é o que mantém a "regra de ouro" — código
 e documentação nunca divergem por mais que uma sessão, e o índice RAG nunca
 fica quebrado silenciosamente por mais que uma sessão também.
+
+**Os `.md` da raiz entram no índice só se estiverem versionados** (`git
+ls-files`). Documento escrito para alguém de fora — guia para outro time,
+material de fornecedor — não deve morar em `docs/` nem versionado na raiz: o
+mesmo assunto dito de outro jeito para outro leitor compete no retrieval com a
+resposta curta e a desloca.
 
 **Nunca deixe o changelog crescer como um único bloco de texto no topo de um
 arquivo.** É o erro estrutural mais caro desta skill: um "Última
