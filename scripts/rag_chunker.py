@@ -33,8 +33,37 @@ import subprocess
 import sys
 from pathlib import Path
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def exige_chroma_sem_bug_de_encoding() -> None:
+    """Para em vez de corromper o índice em silêncio.
+
+    O chromadb < 1.0 (backend SQLite em Python) grava o texto no encoding do
+    locale quando o modo UTF-8 do Python (PEP 540) está desligado. No Windows
+    (cp1252) toda acentuação vira "\\ufffd" e o rag_ingest.py reporta sucesso
+    mesmo assim. O backend em Rust (>= 1.0, o pinado em requirements.txt) não
+    tem o problema: medido com o 1.5.9 e PYTHONUTF8=0, o texto volta íntegro.
+    Todo script do pipeline importa este módulo antes de tocar no Chroma.
+    """
+    if sys.flags.utf8_mode:
+        return
+    try:
+        from importlib.metadata import version
+        major = int(version("chromadb").split(".")[0])
+    except Exception:  # chromadb ausente ou versão ilegível: o import dele acusa
+        return
+    if major < 1:
+        sys.exit(
+            "chromadb < 1.0 sem o modo UTF-8 do Python corrompe a acentuação do índice "
+            "(cp1252 no Windows). Instale as versões de scripts/requirements.txt "
+            "ou rode com PYTHONUTF8=1."
+        )
+
+
+exige_chroma_sem_bug_de_encoding()
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {"migrations", "node_modules", ".git", "_site", "site"}

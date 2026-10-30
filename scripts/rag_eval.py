@@ -35,18 +35,11 @@ Parte do plugin docs-maintainer.
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 
-# Ver rag_ingest.py — mesmo bug de encoding (cp1252 vs UTF-8 no backend
-# SQLite do Chroma em Windows) e mesma correção.
-if sys.flags.utf8_mode == 0:
-    env = dict(os.environ, PYTHONUTF8="1")
-    result = subprocess.run([sys.executable, *sys.argv], env=env)
-    sys.exit(result.returncode)
-
+# O encoding do Chroma no Windows é conferido ao importar rag_chunker
+# (exige_chroma_sem_bug_de_encoding), como em todos os scripts do pipeline.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 

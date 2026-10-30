@@ -233,14 +233,16 @@ arquivo renomeado/removido, etc.) — não espere o usuário pedir.
    "últimas N"**: quando ela é o índice navegável do `changelog/` (uma linha
    por entrada), podar apaga o sumário curado — já custou 44 linhas uma vez.
    Leia o cabeçalho da seção antes.
-5. Re-rode a ingestão (incremental, sem `--reset` — é upsert por id de
-   chunk):
+5. Re-rode a ingestão (incremental, sem `--reset` — upsert por id de chunk,
+   e o que deixou de existir é apagado do índice na mesma passada):
    ```bash
    python scripts/rag_ingest.py
    ```
-   ⚠️ Se você **removeu ou renomeou** uma seção `##` ou um arquivo, use
-   `--reset`: o upsert não apaga chunk que deixou de existir, e o antigo fica
-   órfão no índice — o eval pode passar respondendo com o texto apagado.
+   ⚠️ `--reset` só é obrigatório quando muda o **modelo de embedding**: vetores
+   de modelos diferentes não se comparam. Seção renomeada, arquivo apagado e
+   troca de esquema de chunking a ingestão normal já resolve. Se o projeto usa
+   uma cópia antiga do `rag_ingest.py` (sem a limpeza de órfãos), aí sim
+   qualquer remoção pede `--reset`.
 5b. **Commite o `scripts/rag.lock.json` junto com os `docs/*.md` alterados.**
    Sem isso, o resto da equipe não tem como saber que o índice deles ficou
    velho — e nada vai avisar.
